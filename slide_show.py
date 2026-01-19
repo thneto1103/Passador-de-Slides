@@ -24,8 +24,14 @@ class SlideShow:
         self.image_files = []
         self.current_index = 0
         self.is_random_mode = False
-        self.display_duration = 3000  # milliseconds
+        self.display_duration = 3000  # milliseconds (default)
+        self.min_duration = 500  # Fastest (0.5 seconds)
+        self.max_duration = 10000  # Slowest (10 seconds)
         self.transition_duration = 500  # milliseconds
+        
+        # History for random mode navigation
+        self.random_sequence = []  # Complete sequence of visited indices in random mode
+        self.random_sequence_position = -1  # Current position in sequence (-1 means at the end)
         
         # Mouse movement tracking for auto-hide controls
         self.fade_timer = None
@@ -33,34 +39,35 @@ class SlideShow:
         self.control_visible = False
         self.fade_alpha = 1.0  # Opacity level for fade effect
         
+        # Debounce for keyboard events to prevent double-triggering
+        self.last_key_time = {}
+        self.key_debounce_delay = 300  # milliseconds (increased to prevent key repeat)
+        self.navigation_locked = False  # Lock to prevent simultaneous navigation
+        
         # Create canvas for image display
         self.canvas = tk.Canvas(self.root, bg='black', highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.focus_set()  # Make canvas focusable to receive keyboard events
         
-        # Bind keys to both root and canvas for better reliability
-        bindings = [
-            ('<Escape>', self.quit_fullscreen),
-            ('<KeyPress-Escape>', self.quit_fullscreen),
-            ('<space>', self.toggle_mode),
-            ('<KeyPress-space>', self.toggle_mode),
-            ('<Left>', self.previous_image),
-            ('<KeyPress-Left>', self.previous_image),
-            ('<Right>', self.next_image),
-            ('<KeyPress-Right>', self.next_image),
-            ('<r>', self.toggle_random_mode),
-            ('<R>', self.toggle_random_mode),
-            ('<KeyPress-r>', self.toggle_random_mode),
-            ('<KeyPress-R>', self.toggle_random_mode),
-            ('<f>', self.toggle_fullscreen),
-            ('<F>', self.toggle_fullscreen),
-            ('<KeyPress-f>', self.toggle_fullscreen),
-            ('<KeyPress-F>', self.toggle_fullscreen),
-        ]
+        # Bind keys - use KeyRelease for arrow keys to avoid key repeat issues
+        self.canvas.bind('<KeyPress-Escape>', self.quit_fullscreen)
+        self.canvas.bind('<KeyPress-space>', self.toggle_mode)
+        self.canvas.bind('<KeyRelease-Left>', self.debounced_previous_image)  # Use KeyRelease to avoid key repeat
+        self.canvas.bind('<KeyRelease-Right>', self.debounced_next_image)  # Use KeyRelease to avoid key repeat
+        self.canvas.bind('<KeyPress-r>', self.toggle_random_mode)
+        self.canvas.bind('<KeyPress-R>', self.toggle_random_mode)
+        self.canvas.bind('<KeyPress-f>', self.toggle_fullscreen)
+        self.canvas.bind('<KeyPress-F>', self.toggle_fullscreen)
         
-        for key, handler in bindings:
-            self.root.bind(key, handler)
-            self.canvas.bind(key, handler)
+        # Also bind to root for when canvas doesn't have focus
+        self.root.bind('<KeyPress-Escape>', self.quit_fullscreen)
+        self.root.bind('<KeyPress-space>', self.toggle_mode)
+        self.root.bind('<KeyRelease-Left>', self.debounced_previous_image)  # Use KeyRelease to avoid key repeat
+        self.root.bind('<KeyRelease-Right>', self.debounced_next_image)  # Use KeyRelease to avoid key repeat
+        self.root.bind('<KeyPress-r>', self.toggle_random_mode)
+        self.root.bind('<KeyPress-R>', self.toggle_random_mode)
+        self.root.bind('<KeyPress-f>', self.toggle_fullscreen)
+        self.root.bind('<KeyPress-F>', self.toggle_fullscreen)
         
         # Bind all key events to canvas to keep focus
         self.canvas.bind('<Button-1>', lambda e: self.canvas.focus_set())
@@ -93,6 +100,54 @@ class SlideShow:
             font=('Arial', 12, 'bold')
         )
         self.status_label.pack(pady=5)
+        
+        # Speed control slider (only visible when auto mode is on)
+        speed_frame = tk.Frame(self.control_frame, bg='black')
+        speed_frame.pack(pady=5, fill=tk.X, padx=20)
+        
+        speed_label = tk.Label(
+            speed_frame,
+            text="Speed:",
+            bg='black',
+            fg='white',
+            font=('Arial', 10)
+        )
+        speed_label.pack(side=tk.LEFT, padx=5)
+        
+        # Speed slider (0-100, where 0 is slowest, 100 is fastest)
+        # We'll invert it so higher value = faster (lower duration)
+        # Calculate initial slider value from default duration (3000ms)
+        # Formula: slider = 100 * (1 - (duration - min) / (max - min))
+        initial_slider = 100 * (1 - (self.display_duration - self.min_duration) / (self.max_duration - self.min_duration))
+        self.speed_var = tk.DoubleVar()
+        self.speed_var.set(initial_slider)  # Default to middle speed (3000ms)
+        
+        self.speed_slider = tk.Scale(
+            speed_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            variable=self.speed_var,
+            bg='#2a2a2a',
+            fg='white',
+            troughcolor='#1a1a1a',
+            activebackground='#555555',
+            length=300,
+            command=self.update_speed
+        )
+        self.speed_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        
+        # Initialize speed label with current duration
+        initial_speed_seconds = self.display_duration / 1000.0
+        self.speed_value_label = tk.Label(
+            speed_frame,
+            text=f"{initial_speed_seconds:.1f}s",
+            bg='black',
+            fg='white',
+            font=('Arial', 10),
+            width=6
+        )
+        self.speed_value_label.pack(side=tk.LEFT, padx=5)
         
         # Button frame
         button_frame = tk.Frame(self.control_frame, bg='black')
@@ -323,7 +378,7 @@ class SlideShow:
         # Title label
         title_label = tk.Label(
             dialog,
-            text="Select Photo Folders (You can select multiple)",
+            text="Select Photo Folders",
             bg='#1a1a1a',
             fg='white',
             font=('Arial', 14, 'bold'),
@@ -442,15 +497,33 @@ class SlideShow:
         finish_btn.pack(side=tk.LEFT, padx=5)
         
         # Instructions
+        instructions_text = (
+            "📁 You can select a parent folder (e.g., 'Photo') that contains multiple subfolders (e.g., 'Photos2003', 'PhotosFromCamp').\n"
+            "The app will automatically scan ALL subfolders and their contents recursively.\n"
+            "💡 Tip: Click 'Add Folder' to select parent folders. All images in subfolders will be included automatically."
+        )
         info_label = tk.Label(
             dialog,
-            text="Click 'Add Folder' to select folders. Select a folder in the list and click 'Remove' to remove it.",
+            text=instructions_text,
             bg='#1a1a1a',
-            fg='#aaaaaa',
+            fg='#cccccc',
             font=('Arial', 9),
+            wraplength=550,
+            justify=tk.LEFT
+        )
+        info_label.pack(pady=10, padx=20)
+        
+        # Example structure label
+        example_label = tk.Label(
+            dialog,
+            text="Example structure:\nPhoto/ → Photos2003/ (photo1.jpg, photo2.jpg...)\n      → PhotosFromCamp/ (photo1.jpg, photo2.jpg...)\n\nSelect 'Photo' folder and all subfolders will be scanned!",
+            bg='#1a1a1a',
+            fg='#88cc88',
+            font=('Courier', 8),
+            justify=tk.LEFT,
             wraplength=550
         )
-        info_label.pack(pady=5)
+        example_label.pack(pady=5, padx=20)
         
         # Focus on dialog
         dialog.focus_set()
@@ -559,22 +632,100 @@ class SlideShow:
             status_text += " | [RANDOM MODE]"
         self.status_label.config(text=status_text)
     
+    def debounced_next_image(self, event=None):
+        """Debounced wrapper for next_image to prevent double-triggering"""
+        # Check if navigation is locked (prevent simultaneous execution)
+        if self.navigation_locked:
+            return
+        
+        import time
+        current_time = time.time() * 1000  # Convert to milliseconds
+        key = 'Right'
+        
+        if key in self.last_key_time:
+            time_since_last = current_time - self.last_key_time[key]
+            if time_since_last < self.key_debounce_delay:
+                return  # Ignore if too soon after last press
+        
+        self.last_key_time[key] = current_time
+        self.navigation_locked = True  # Lock navigation
+        
+        try:
+            self.next_image(event)
+        finally:
+            # Unlock after a short delay to allow next navigation
+            self.root.after(self.key_debounce_delay, lambda: setattr(self, 'navigation_locked', False))
+    
+    def debounced_previous_image(self, event=None):
+        """Debounced wrapper for previous_image to prevent double-triggering"""
+        # Check if navigation is locked (prevent simultaneous execution)
+        if self.navigation_locked:
+            return
+        
+        import time
+        current_time = time.time() * 1000  # Convert to milliseconds
+        key = 'Left'
+        
+        if key in self.last_key_time:
+            time_since_last = current_time - self.last_key_time[key]
+            if time_since_last < self.key_debounce_delay:
+                return  # Ignore if too soon after last press
+        
+        self.last_key_time[key] = current_time
+        self.navigation_locked = True  # Lock navigation
+        
+        try:
+            self.previous_image(event)
+        finally:
+            # Unlock after a short delay to allow next navigation
+            self.root.after(self.key_debounce_delay, lambda: setattr(self, 'navigation_locked', False))
+    
     def next_image(self, event=None):
         """Go to next image"""
         if not self.image_files:
             return
         
         if self.is_random_mode:
-            self.current_index = random.randint(0, len(self.image_files) - 1)
+            # Check if we're in the middle of the sequence (went back before)
+            if self.random_sequence_position >= 0 and self.random_sequence_position < len(self.random_sequence) - 1:
+                # We're in the middle - continue the existing sequence
+                self.random_sequence_position += 1
+                self.current_index = self.random_sequence[self.random_sequence_position]
+            else:
+                # We're at the end - add current to sequence if not already there, then get new random
+                if not self.random_sequence or self.random_sequence[-1] != self.current_index:
+                    self.random_sequence.append(self.current_index)
+                    self.random_sequence_position = len(self.random_sequence) - 1
+                
+                # Get next random image
+                new_index = random.randint(0, len(self.image_files) - 1)
+                # Avoid showing the same image immediately
+                while new_index == self.current_index and len(self.image_files) > 1:
+                    new_index = random.randint(0, len(self.image_files) - 1)
+                
+                # Add the new index to sequence
+                self.current_index = new_index
+                self.random_sequence.append(self.current_index)
+                # Keep only last 15 items in sequence
+                if len(self.random_sequence) > 15:
+                    # Adjust position if we trimmed from the beginning
+                    trim_count = len(self.random_sequence) - 15
+                    self.random_sequence = self.random_sequence[-15:]
+                    self.random_sequence_position = len(self.random_sequence) - 1
+                else:
+                    self.random_sequence_position = len(self.random_sequence) - 1
         else:
             self.current_index = (self.current_index + 1) % len(self.image_files)
+            # Clear random sequence when in sequential mode
+            self.random_sequence = []
+            self.random_sequence_position = -1
         
         image_path = self.image_files[self.current_index]
         self.display_image(image_path)
         
         # Reschedule next slide only if auto-advance is enabled
         if hasattr(self, 'slideshow_running') and self.slideshow_running:
-            self.root.after(self.display_duration, self.next_image)
+            self.pending_timer = self.root.after(int(self.display_duration), self.next_image)
     
     def previous_image(self, event=None):
         """Go to previous image"""
@@ -582,28 +733,80 @@ class SlideShow:
             return
         
         if self.is_random_mode:
-            self.current_index = random.randint(0, len(self.image_files) - 1)
+            # Add current index to sequence if we're at the end
+            if self.random_sequence_position == -1 or self.random_sequence_position == len(self.random_sequence) - 1:
+                if not self.random_sequence or self.random_sequence[-1] != self.current_index:
+                    self.random_sequence.append(self.current_index)
+                    if len(self.random_sequence) > 15:
+                        # Adjust position if we trimmed from the beginning
+                        trim_count = len(self.random_sequence) - 15
+                        self.random_sequence = self.random_sequence[-15:]
+                        self.random_sequence_position = len(self.random_sequence) - 1
+                    else:
+                        self.random_sequence_position = len(self.random_sequence) - 1
+            
+            # Go back through sequence if available
+            if self.random_sequence and len(self.random_sequence) > 1:
+                # Go to previous item in sequence
+                if self.random_sequence_position > 0:
+                    self.random_sequence_position -= 1
+                    self.current_index = self.random_sequence[self.random_sequence_position]
+                else:
+                    # Already at the beginning of sequence, stay at first item
+                    self.current_index = self.random_sequence[0]
+                    self.random_sequence_position = 0
+            elif self.random_sequence:
+                # Only one item in sequence
+                self.current_index = self.random_sequence[0]
+                self.random_sequence_position = 0
+            else:
+                # No sequence, just pick a random one
+                self.current_index = random.randint(0, len(self.image_files) - 1)
         else:
             self.current_index = (self.current_index - 1) % len(self.image_files)
+            # Don't clear sequence when in sequential mode - keep it for when random mode is re-enabled
+            self.random_sequence_position = -1
         
         image_path = self.image_files[self.current_index]
         self.display_image(image_path)
     
     def toggle_random_mode(self, event=None):
         """Toggle between sequential and random mode"""
+        was_random = self.is_random_mode
         self.is_random_mode = not self.is_random_mode
+        
         if self.is_random_mode:
-            self.current_index = random.randint(0, len(self.image_files) - 1)
+            # If we're turning random mode ON (was off before), create a new sequence
+            if not was_random:
+                # Starting fresh - initialize sequence with current index
+                self.random_sequence = [self.current_index]
+                self.random_sequence_position = 0
+            else:
+                # Already in random mode, just ensure current index is in sequence
+                if not self.random_sequence:
+                    self.random_sequence = [self.current_index]
+                    self.random_sequence_position = 0
+                elif self.current_index in self.random_sequence:
+                    # Find current position in sequence
+                    self.random_sequence_position = self.random_sequence.index(self.current_index)
+                else:
+                    # Add current to sequence
+                    self.random_sequence.append(self.current_index)
+                    self.random_sequence_position = len(self.random_sequence) - 1
+            
             self.random_button.config(text="🎲 Random [ON]", bg='#006600')
             self.status_label.config(text=f"[RANDOM MODE] | Total: {len(self.image_files)} images")
         else:
-            # Reload images in sorted order
+            # Reload images in sorted order when turning off random mode
             self.load_images()
+            # Clear sequence when turning off - will create new one when turned on again
+            self.random_sequence = []
+            self.random_sequence_position = -1
             self.random_button.config(text="🎲 Random", bg='#333333')
             self.status_label.config(text=f"[SEQUENTIAL MODE] | Total: {len(self.image_files)} images")
         
-        image_path = self.image_files[self.current_index]
-        self.display_image(image_path)
+        # Don't change the image, just update the status
+        # The current image stays the same, only the mode changes
     
     def start_slideshow(self):
         """Start slideshow (manual mode by default)"""
@@ -616,6 +819,26 @@ class SlideShow:
         self.display_image(image_path)
         # Don't start auto-advance - user must click Next or enable Auto
     
+    def update_speed(self, value=None):
+        """Update display duration based on speed slider value"""
+        # Slider value is 0-100, where 0 = slowest (max_duration), 100 = fastest (min_duration)
+        slider_value = self.speed_var.get()
+        # Invert: 0 = slow, 100 = fast
+        # Calculate duration: min_duration + (max_duration - min_duration) * (1 - slider_value/100)
+        self.display_duration = self.min_duration + (self.max_duration - self.min_duration) * (1 - slider_value / 100)
+        
+        # Update label to show current speed
+        speed_seconds = self.display_duration / 1000.0
+        self.speed_value_label.config(text=f"{speed_seconds:.1f}s")
+        
+        # If auto-advance is running, restart with new duration
+        if hasattr(self, 'slideshow_running') and self.slideshow_running:
+            # Cancel any pending next_image calls
+            if hasattr(self, 'pending_timer'):
+                self.root.after_cancel(self.pending_timer)
+            # Restart with new duration
+            self.pending_timer = self.root.after(int(self.display_duration), self.next_image)
+    
     def toggle_auto_advance(self, event=None):
         """Toggle auto-advance mode on/off"""
         if not hasattr(self, 'slideshow_running'):
@@ -625,10 +848,13 @@ class SlideShow:
         
         if self.slideshow_running:
             self.auto_advance_button.config(text="⏭ Auto [ON]", bg='#006600')
-            # Start auto-advancing
-            self.root.after(self.display_duration, self.next_image)
+            # Start auto-advancing with current speed
+            self.pending_timer = self.root.after(int(self.display_duration), self.next_image)
         else:
             self.auto_advance_button.config(text="⏭ Auto [OFF]", bg='#333333')
+            # Cancel any pending timers
+            if hasattr(self, 'pending_timer'):
+                self.root.after_cancel(self.pending_timer)
     
     def toggle_mode(self, event=None):
         """Toggle pause/resume (deprecated - use toggle_auto_advance instead)"""

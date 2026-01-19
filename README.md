@@ -44,18 +44,71 @@ python slide_show.py
 ```
 
 When the application starts:
-1. A dialog will appear asking you to select the "Photos" folder
-2. Select the folder containing your photo subfolders
+1. A dialog will appear asking you to select photo folder(s)
+2. Select one or more folders containing your photos (subfolders are automatically scanned)
 3. The slideshow will start automatically
+
+## Building an Executable
+
+You can create a standalone executable that runs without Python installed.
+
+### Windows
+
+1. Open Command Prompt or PowerShell in the project folder
+2. Run the build script:
+
+```bash
+build_executable.bat
+```
+
+Or manually:
+
+```bash
+pip install pyinstaller
+pyinstaller --name="PhotoSlideShow" --onefile --windowed --hidden-import=PIL --hidden-import=PIL.Image --hidden-import=PIL.ImageTk slide_show.py
+```
+
+The executable will be in the `dist` folder: `dist\PhotoSlideShow.exe`
+
+### Linux/Mac
+
+1. Open Terminal in the project folder
+2. Make the script executable (first time only):
+
+```bash
+chmod +x build_executable.sh
+```
+
+3. Run the build script:
+
+```bash
+./build_executable.sh
+```
+
+Or manually:
+
+```bash
+pip install pyinstaller
+pyinstaller --name="PhotoSlideShow" --onefile --windowed --hidden-import=PIL --hidden-import=PIL.Image --hidden-import=PIL.ImageTk slide_show.py
+```
+
+The executable will be in the `dist` folder: `dist/PhotoSlideShow`
+
+**Note**: The executable is standalone and can be distributed without Python. Just copy the `.exe` (Windows) or executable file (Linux/Mac) to any computer.
 
 ## Controls
 
-- **ESC**: Exit fullscreen or quit application
-- **SPACE**: Pause/Resume slideshow
-- **R**: Toggle between Sequential and Random mode
-- **← (Left Arrow)**: Previous image
-- **→ (Right Arrow)**: Next image
-- **F**: Toggle fullscreen mode
+### Buttons (Auto-hide on mouse inactivity)
+
+- **← Previous**: Go to previous image
+- **⏭ Auto [ON/OFF]**: Toggle automatic slideshow mode
+- **⏸ Pause / ▶ Resume**: Pause/resume slideshow
+- **🎲 Random**: Toggle random mode (randomly selects photos)
+- **⛶ Fullscreen**: Toggle fullscreen mode
+- **Next →**: Go to next image
+- **✕ Quit**: Exit application
+
+**Note**: Control buttons automatically hide after 3-4 seconds of mouse inactivity. Move the mouse to show them again.
 
 ## Supported Image Formats
 
